@@ -1,5 +1,5 @@
 ########################################################################
-# life.py
+# paralife.py
 #
 # Author: Kevin Moore
 #
@@ -16,16 +16,12 @@ import matplotlib.animation as animation
 from mpi4py import MPI
 
 class Life:
-	'''inputs:
-			N: length & width of the simulation in number of cells'''
+	'''N: length & width of the simulation in number of cells'''
 	def __init__(self, N):
 		self.N = N
 		self.grid = np.random.choice(2, (N,N))
 		self.aug_grid = self.form_aug_grid(self.grid)
 		self.fig = plt.figure()
-
-		#self.fig, self.ax = plt.subplots()
-		#self.mat = self.ax.matshow(self.grid)
 
 	def __str__(self):
 		return str(self.grid)
@@ -55,9 +51,12 @@ class Life:
 		plt.cla()	#Clear the plot so things draw much faster
 		return plt.imshow(self.grid, interpolation='nearest')
 
-	def update_para(self,i):
+	'''Updates the simulation using a 1d domain decomposition: every process works
+		on a group of rows determined by that processor's rank, then the results are
+		broadcast to all the other processes so that each process has the entire updated 
+		simulation domain after each step'''
+	def update_para_1d_dec(self,i):
 		#print 'Updating!'
-		newgrid = self.grid
 		for row in range(N):
 			if(row % mpi_size == rank):
 				#print 'proc ',rank,' working on row ',row
@@ -66,19 +65,50 @@ class Life:
 						self.grid[row][col] = 1
 					elif self.neighbor_sum(row,col) != 2:
 						self.grid[row][col] = 0
-					#Broadcast just this finished row to the rest of the procs:
 
 		#comm.barrier()
+		#Broadcast just this finished row to the rest of the procs:
 		for row in range(N):
 			#print rank, self.grid.shape, self.grid[row].shape
 			self.grid[row] = comm.bcast(self.grid[row], root=row % mpi_size)
 
-		#print newgrid
-		#self.grid = newgrid
+		#Is it faster for one process to calculate the aug_grid and then broadcast it
+		#to the other processes, or for all the processes to calculate it? I assume
+		#This varies with process number and problem size, but didn't notice any
+		#difference using 2 processes on my laptop.
 		if(rank == 0):
 			self.aug_grid = self.form_aug_grid(self.grid)
 		self.aug_grid = comm.bcast(self.aug_grid,root=0)
 
+		plt.cla()	#Clear the plot so things draw much faster
+		return plt.imshow(self.grid, interpolation='nearest')
+
+	'''Updates the simulation using a 2d domain decomposition: each process gets 
+		a rectangular (square?) patch to work on '''
+	def update_para_2d_dec(self,i):
+		#print 'Updating!'
+		for row in range(N):
+			if(row % mpi_size == rank):
+				#print 'proc ',rank,' working on row ',row
+				for col in range(N):
+					if self.neighbor_sum(row,col) == 3:
+						self.grid[row][col] = 1
+					elif self.neighbor_sum(row,col) != 2:
+						self.grid[row][col] = 0
+
+		#comm.barrier()
+		#Broadcast just this finished row to the rest of the procs:
+		for row in range(N):
+			#print rank, self.grid.shape, self.grid[row].shape
+			self.grid[row] = comm.bcast(self.grid[row], root=row % mpi_size)
+
+		#Is it faster for one process to calculate the aug_grid and then broadcast it
+		#to the other processes, or for all the processes to calculate it? I assume
+		#This varies with process number and problem size, but didn't notice any
+		#difference using 2 processes on my laptop.
+		if(rank == 0):
+			self.aug_grid = self.form_aug_grid(self.grid)
+		self.aug_grid = comm.bcast(self.aug_grid,root=0)
 
 		plt.cla()	#Clear the plot so things draw much faster
 		return plt.imshow(self.grid, interpolation='nearest')
@@ -98,14 +128,14 @@ class Life:
 		anim = animation.FuncAnimation(self.fig, self.update, interval=10)
 		plt.show()
 
-	'''Play a movie of the simulation with parallelization'''
+	'''Play a movie of the simulation with parallelization.'''
 	def movie_para(self):
 		#fig, ax = plt.subplots()
 		#mat = ax.matshow(self.grid)
-		anim = animation.FuncAnimation(self.fig, self.update_para, interval=10)
+		anim = animation.FuncAnimation(self.fig, self.update_para_1d_dec, interval=10)
 		plt.show()
 
-N = 500 #Size of grid for the game of life
+N = 50 #Size of grid for the game of life
 comm = MPI.COMM_WORLD
 mpi_size = comm.Get_size()
 #Figure out MPI division of tasks (how many rows per processor)
@@ -121,7 +151,10 @@ elif(mpi_size > 1):
 else:
 	print "Running in serial mode."
 
+
+do_movie = True
 game = Life(N) #Initialize the game with a grid of size N
+
 #Make proc 0 have the true matrix - send it to the others:
 game.grid = comm.bcast(game.grid, root=0)
 game.aug_grid = game.form_aug_grid(game.grid)
@@ -129,84 +162,27 @@ rank = comm.Get_rank()
 print rank, game
 print ""
 
-if(mpi_size == 1):
-	game.movie()
+#Running with the movie enabled in parallel will cause an animation to pop up
+#for each process. This is pretty impractical and only intended for testing
+#purposes. I don't know if there's a way to make only one process display the
+#movie, but nothing I've tried works so far.
+if(do_movie):
+	if(mpi_size == 1):
+		game.movie()
+	else:
+		game.movie_para()
+#For running without the movie, just run the simulation for num_steps.
 else:
 	num_steps = 100
-	#game.movie_para()
 	for i in range(num_steps):
-		game.update_para(i)
-		#if(rank == 0):
-		#	plt.cla()
-		#	game.show()
+		game.update_para_1d_dec(i)
 
-
-#Now all processors have the same game grid, let's see if we can split up the 
-#updating accordingly:
-#newgrid = game.grid
-#for row in range(N):
-#	if((rank+1) % (row+1) == 0):
-#		for col in range(N):
-#			if game.neighbor_sum(row,col) == 3:
-#				game.grid[row][col] = 1
-#			elif game.neighbor_sum(row,col) != 2:
-#				game.grid[row][col] = 0
-			#Broadcast just this finished row to the rest of the procs:
-#		newgrid[row] = comm.bcast(game.grid[row],root=rank)
-#comm.barrier()
-#game.grid = newgrid
-
-#num=3
-#game.update_para(num)
-#print rank, game
-#print ""
-
-#comm.barrier()
-#game.update_para(num)
-#print rank, game
-#print ""
-
-#if(rank == 0):
-	#game.movie_para()
-	#fig = plt.figure()
-	#anim = animation.FuncAnimation(game.fig, game.update_para, interval=10)
-	#plt.show()
-
-#print rank, game
-#print ""
-
-
-#This section will make it work with multiple processors enabled using mpiexec
-#if(rank == 0):
-#	fig = plt.figure()
-#	anim = animation.FuncAnimation(fig, game.update, interval=10)
-#	plt.show()
-#else:
-#	while(True):
-#		sleep(1.0)
-
-
-#rank = game.comm.Get_rank()
-#if(rank == 0):
-#	game.movie()
 
 #Want parallel version to look like:
 	#Setup data for all processors (do one random and send to others?)
 	#Split work for the update task between processors
 		#Communicate the work back to other processors comm.bcast()?
 	#Animate data (maybe with just one processor?)
-
-
-#game.show()
-#game.update()
-#game.show()
-#game.update()
-#game.show()
-
-#fig, ax = plt.subplots()
-#mat = ax.matshow(game.grid)
-#anim = animation.FuncAnimation(fig, game.update, frames=30, interval=1, blit=True)
-#plt.show()
 
 #Initialize the grid:
 #grid = np.random.choice(2, (N,N))
