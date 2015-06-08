@@ -22,7 +22,7 @@ class Life:
 		self.comm = MPI.COMM_WORLD
 		self.mpi_size = comm.Get_size()
 		self.rank = comm.Get_rank()
-		self.grid = np.random.choice(2, (N,N))
+		self.grid = np.asfortranarray(np.random.choice(2, (N,N)))
 		self.aug_grid = self.form_aug_grid(self.grid)
 
 		#If we're doing the point-to-point communication method, then each process
@@ -32,7 +32,7 @@ class Life:
 		#1-N (indices 0 and N+1 are ghost cells). Likewise, the columns we will care
 		#about have indices 1-self.cols_per_proc with the first & last being ghosts.
 		if(self.mpi_size > 1):
-			recv_buf = np.arange(N+2)
+			recv_buf = np.asfortranarray(np.arange(N+2))
 			self.cols_per_proc = int(np.ceil(N*1.0/self.mpi_size))
 			self.proc_grid = np.random.choice(2, (N+2,self.cols_per_proc+2))
 
@@ -51,6 +51,9 @@ class Life:
 			#Make the bottom/top boundaries reflective:
 			self.proc_grid[0,:] = self.proc_grid[N,:]
 			self.proc_grid[N+1,:] = self.proc_grid[1,:]
+
+			#Make the array column-major in memory so that columns can be scatter/gathered
+			self.proc_grid = np.asfortranarray(self.proc_grid)
 
 			#Set up all the ghost cells between the processes:
 			self.comm_ghosts()
@@ -111,6 +114,7 @@ class Life:
 			self.aug_grid[row+1][col+2] + self.aug_grid[row+1][col] + \
 			self.aug_grid[row][col+2] + self.aug_grid[row][col+1] + self.aug_grid[row][col]
 
+
 	'''Function that sums all the neighbors of the (row,col)'th entry of the grid using
 		data local to this process (self.proc_grid)'''
 	def neighbor_sum_local(self,row,col):
@@ -141,19 +145,66 @@ class Life:
 	def update_para_1d_dec_point_to_point(self,i):
 		#Make a temporary grid so that we don't overwrite cells while working on
 		#the update step:
-		temp_grid = self.proc_grid
+		#if(rank == 1):
+		#	print 'update_para_1d_dec_point_to_point:', rank, self.proc_grid
 
+		temp_grid = np.copy(self.proc_grid)
 		for row in range(1,N+1):
 			for col in range(1,self.cols_per_proc+1):
+				#if(rank == 1):
+				#	print row, col, self.neighbor_sum_local(row,col)
 				if self.neighbor_sum_local(row,col) == 3:
 					temp_grid[row][col] = 1
 				elif self.neighbor_sum_local(row,col) != 2:
 					temp_grid[row][col] = 0
 		self.proc_grid = temp_grid
+		#Enforce top/bottom row boundary conditions:
+		self.proc_grid[0,:] = self.proc_grid[N,:]
+		self.proc_grid[N+1,:] = self.proc_grid[1,:]
 
 		#Now send the updated columns to the necessary
 		comm.barrier()
+		#if(rank == 1):
+		#	print rank, self.proc_grid
 		self.comm_ghosts()
+
+		#For testing with the animation:
+		self.reconstruct_full_sim()
+		#print rank, self.grid
+
+		plt.cla()	#Clear the plot so things draw much faster
+		return plt.imshow(self.grid, interpolation='nearest')
+
+
+	'''Reconstructs the data for the full simulation on every processor for a
+		visualization check.'''
+	def reconstruct_full_sim(self):
+		recv_buf_ary = np.arange(self.N*self.N)
+		#recv_buf_ary = np.empty((self.N,self.N))
+		#print self.cols_per_proc, self.proc_grid[1:N+1, 1:(self.cols_per_proc+2)-1]
+		#send_buf_ary = np.asfortranarray(np.reshape(self.proc_grid[1:N+1, 1:(self.cols_per_proc+2)-1],(self.N*self.cols_per_proc)))
+		send_buf_ary = np.asfortranarray(self.proc_grid[1:N+1, 1:(self.cols_per_proc+2)-1])
+		#print np.shape(recv_buf_ary)
+		recv_buf_ary = comm.gather(send_buf_ary,root=0)
+		if(self.rank == 0):
+			#print rank, self.proc_grid, recv_buf_ary, len(recv_buf_ary)
+			#recv_buf_ary = self.proc_grid[1:N+1, 1:(self.cols_per_proc+2)-1]
+			#print np.shape(recv_buf_ary), np.shape(self.grid)
+			#print recv_buf_ary, recv_buf_ary[0]
+			#self.grid[:,0] = recv_buf_ary[0][0:4]
+			#self.grid[:,1] = recv_buf_ary[0][4:8]
+			#self.grid[:,0:self.cols_per_proc] = recv_buf_ary[0].reshape((4,2))
+			for proc in range(len(recv_buf_ary)):
+				self.grid[:,proc*self.cols_per_proc:(proc+1)*self.cols_per_proc] = recv_buf_ary[proc]
+			#self.grid[:,self.cols_per_proc:2*self.cols_per_proc] = recv_buf_ary
+			#print self.grid
+
+			#print self.rank, recv_buf_ary[0], recv_buf_ary[1]
+			#self.grid[:,self.rank*self.cols_per_proc:(self.rank+1)*self.cols_per_proc] = recv_buf_ary[:,:,]
+			#print recv_buf_ary
+		self.grid = comm.bcast(self.grid, root=0)
+		#self.grid[:,self.rank*self.cols_per_proc:(self.rank+1)*self.cols_per_proc] = \
+		#	comm.bcast(np.array(self.proc_grid[1:N+1,self.rank*self.cols_per_proc:(self.rank+1)*self.cols_per_proc]))
 
 
 	'''Updates the simulation using a 1d domain decomposition: every process works
@@ -241,10 +292,11 @@ class Life:
 	def movie_para(self):
 		#fig, ax = plt.subplots()
 		#mat = ax.matshow(self.grid)
-		anim = animation.FuncAnimation(self.fig, self.update_para_1d_dec, interval=10)
+		#anim = animation.FuncAnimation(self.fig, self.update_para_1d_dec, interval=10)
+		anim = animation.FuncAnimation(self.fig, self.update_para_1d_dec_point_to_point, interval=10)
 		plt.show()
 
-N = 40 #Size of grid for the game of life
+N = 32 #Size of grid for the game of life
 comm = MPI.COMM_WORLD
 mpi_size = comm.Get_size()
 #Figure out MPI division of tasks (how many rows per processor)
@@ -261,7 +313,7 @@ else:
 	print "Running in serial mode."
 
 
-do_movie = False
+do_movie = True
 game = Life(N) #Initialize the game with a grid of size N
 
 #Make proc 0 have the true matrix - send it to the others:
@@ -284,10 +336,12 @@ if(do_movie):
 		game.movie_para()
 #For running without the movie, just run the simulation for num_steps.
 else:
-	num_steps = 100
+	num_steps = 10
 	for i in range(num_steps):
 		game.update_para_1d_dec_point_to_point(i)
-		print rank, game.proc_grid
+		#print rank, game.proc_grid
+		if(rank == 0):
+			print rank, game.grid
 		#game.update_para_1d_dec(i)
 
 
